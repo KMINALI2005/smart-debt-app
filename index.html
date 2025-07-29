@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>تطبيق الديون الذكي</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, addDoc, updateDoc, deleteDoc, onSnapshot, collection, doc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase configuration - قم بتغيير هذه القيم إلى بيانات مشروعك الحقيقية من Firebase Console
+        // اذهب إلى Firebase Console -> Project settings -> General -> Your apps -> Firebase SDK snippet -> Config
+        const firebaseConfig = {
+            apiKey: "YOUR_API_KEY", // <--- استبدل هذا بمفتاح API الخاص بك
+            authDomain: "YOUR_PROJECT_ID.firebaseapp.com", // <--- استبدل هذا بـ authDomain الخاص بك
+            projectId: "YOUR_PROJECT_ID", // <--- استبدل هذا بـ projectId الخاص بك
+            storageBucket: "YOUR_PROJECT_ID.appspot.com", // <--- استبدل هذا بـ storageBucket الخاص بك
+            messagingSenderId: "YOUR_MESSAGING_SENDER_ID", // <--- استبدل هذا بـ messagingSenderId الخاص بك
+            appId: "YOUR_APP_ID" // <--- استبدل هذا بـ appId الخاص بك
+        };
+
+        // Global Firebase variables
+        window.firebaseApp = null;
+        window.db = null;
+        window.auth = null;
+        window.currentUserId = null;
+
+        // Global data structure for current debts (will be updated by Firestore listeners)
+        let appData = {
+            individual: [],
+            wholesale: [],
+            agent: []
+        };
+        let currentCategory = 'individual'; // Default active category
+
+        // --- Helper Functions ---
+
+        // Function to show custom modal (alert or confirm)
+        function showModal(title, message, type, onConfirm = null) {
+            const customModal = document.getElementById('customModal');
+            const modalTitle = document.getElementById('modalTitle');
+            const modalMessage = document.getElementById('modalMessage');
+            const modalConfirmBtn = document.getElementById('modalConfirmBtn');
+            const modalCancelBtn = document.getElementById('modalCancelBtn');
+            const modalOkBtn = document.getElementById('modalOkBtn');
+
+            modalTitle.textContent = title;
+            modalMessage.textContent = message;
+            customModal.classList.remove('hidden');
+
+            modalConfirmBtn.classList.add('hidden');
+            modalCancelBtn.classList.add('hidden');
+            modalOkBtn.classList.add('hidden');
+
+            if (type === 'confirm') {
+                modalConfirmBtn.classList.remove('hidden');
+                modalCancelBtn.classList.remove('hidden');
+                modalConfirmBtn.onclick = () => {
+                    customModal.classList.add('hidden');
+                    if (onConfirm) onConfirm(true);
+                };
+                modalCancelBtn.onclick = () => {
+                    customModal.classList.add('hidden');
+                    if (onConfirm) onConfirm(false);
+                };
+            } else { // 'alert' type
+                modalOkBtn.classList.remove('hidden');
+                modalOkBtn.onclick = () => {
+                    customModal.classList.add('hidden');
+                    if (onConfirm) onConfirm();
+                };
+                modalCancelBtn.classList.remove('hidden');
+                modalCancelBtn.onclick = () => {
+                    customModal.classList.add('hidden');
+                    if (onConfirm) onConfirm();
+                };
+            }
+        }
+
+        // Function to clear form inputs for a given category
+        function clearForm(category) {
+            switch (category) {
+                case 'individual':
+                    document.getElementById('individualDebtorName').value = '';
+                    document.getElementById('individualDebtAmount').value = '';
+                    document.getElementById('individualDueDate').value = '';
+                    document.getElementById('individualDebtDescription').value = '';
+                    break;
+                case 'wholesale':
+                    document.getElementById('wholesaleDebtorName').value = '';
+                    document.getElementById('wholesaleDebtAmount').value = '';
+                    document.getElementById('wholesaleDueDate').value = '';
+                    document.getElementById('wholesaleDebtDescription').value = '';
+                    break;
+                case 'agent':
+                    document.getElementById('agentDebtorName').value = '';
+                    document.getElementById('agentDebtAmount').value = '';
+                    document.getElementById('agentDueDate').value = '';
+                    document.getElementById('agentDebtDescription').value = '';
+                    break;
+            }
+        }
+
+        // Function to get the Firestore collection path for a given category and user
+        function getCollectionRef(category) {
+            const userId = window.currentUserId;
+            return collection(window.db, `users/${userId}/${category}Debts`);
+        }
+
+        // --- Core Logic Functions (parameterized by category) ---
+
+        // Function to add a new debt to Firestore
+        async function addDebt(category) {
+            if (!window.db || !window.currentUserId) {
+                showModal('خطأ', 'الرجاء الانتظار حتى يتم تحميل التطبيق بالكامل وتكوين Firebase بشكل صحيح.', 'alert');
+                return;
+            }
+
+            let debtorName, debtAmount, dueDate, debtDescription;
+            let debtorNameInput, debtAmountInput, dueDateInput, debtDescriptionInput;
+
+            switch (category) {
+                case 'individual':
+                    debtorNameInput = document.getElementById('individualDebtorName');
+                    debtAmountInput = document.getElementById('individualDebtAmount');
+                    dueDateInput = document.getElementById('individualDueDate');
+                    debtDescriptionInput = document.getElementById('individualDebtDescription');
+                    break;
+                case 'wholesale':
+                    debtorNameInput = document.getElementById('wholesaleDebtorName');
+                    debtAmountInput = document.getElementById('wholesaleDebtAmount');
+                    dueDateInput = document.getElementById('wholesaleDueDate');
+                    debtDescriptionInput = document.getElementById('wholesaleDebtDescription');
+                    break;
+                case 'agent':
+                    debtorNameInput = document.getElementById('agentDebtorName');
+                    debtAmountInput = document.getElementById('agentDebtAmount');
+                    dueDateInput = document.getElementById('agentDueDate');
+                    debtDescriptionInput = document.getElementById('agentDebtDescription');
+                    break;
+            }
+
+            debtorName = debtorNameInput.value.trim();
+            debtAmount = parseFloat(debtAmountInput.value);
+            dueDate = dueDateInput.value;
+            debtDescription = debtDescriptionInput.value.trim();
+
+            if (!debtorName || isNaN(debtAmount) || debtAmount <= 0 || !dueDate) {
+                showModal('خطأ في الإدخال', 'الرجاء إدخال اسم المدين والمبلغ وتاريخ الاستحقاق بشكل صحيح.', 'alert');
+                return;
+            }
+
+            const newDebt = {
+                debtorName,
+                amount: debtAmount,
+                originalAmount: debtAmount,
+                dueDate,
+                description: debtDescription,
+                isPaid: false,
+                createdAt: new Date().toISOString() // Store as ISO string
+            };
+
+            try {
+                await addDoc(getCollectionRef(category), newDebt);
+                clearForm(category);
+                showModal('تمت الإضافة', 'تمت إضافة الدين بنجاح.', 'alert');
+            } catch (e) {
+                console.error("Error adding document: ", e);
+                showModal('خطأ', 'حدث خطأ أثناء إضافة الدين. الرجاء المحاولة مرة أخرى.', 'alert');
+            }
+        }
+
+        // Function to render debts for a specific category (called by onSnapshot)
+        function renderDebts(category) {
+            let debtListDiv, noDebtsMessage, filterStatusSelect, sortBySelect, searchInput, totalOutstandingSpan;
+
+            switch (category) {
+                case 'individual':
+                    debtListDiv = document.getElementById('individualDebtList');
+                    noDebtsMessage = document.getElementById('noIndividualDebtsMessage');
+                    filterStatusSelect = document.getElementById('individualFilterStatus');
+                    sortBySelect = document.getElementById('individualSortBy');
+                    searchInput = document.getElementById('individualSearchInput');
+                    totalOutstandingSpan = document.getElementById('totalIndividualOutstanding');
+                    break;
+                case 'wholesale':
+                    debtListDiv = document.getElementById('wholesaleDebtList');
+                    noDebtsMessage = document.getElementById('noWholesaleDebtsMessage');
+                    filterStatusSelect = document.getElementById('wholesaleFilterStatus');
+                    sortBySelect = document.getElementById('wholesaleSortBy');
+                    searchInput = document.getElementById('wholesaleSearchInput');
+                    totalOutstandingSpan = document.getElementById('totalWholesaleOutstanding');
+                    break;
+                case 'agent':
+                    debtListDiv = document.getElementById('agentDebtList');
+                    noDebtsMessage = document.getElementById('noAgentDebtsMessage');
+                    filterStatusSelect = document.getElementById('agentFilterStatus');
+                    sortBySelect = document.getElementById('agentSortBy');
+                    searchInput = document.getElementById('agentSearchInput');
+                    totalOutstandingSpan = document.getElementById('totalAgentOutstanding');
+                    break;
+            }
+
+            debtListDiv.innerHTML = ''; // Clear existing list
+
+            let filteredDebts = appData[category].filter(debt => {
+                const statusFilter = filterStatusSelect.value;
+                const searchTerm = searchInput.value.toLowerCase();
+
+                const matchesStatus = (statusFilter === 'all') ||
+                                      (statusFilter === 'paid' && debt.isPaid) ||
+                                      (statusFilter === 'outstanding' && !debt.isPaid);
+
+                const matchesSearch = debt.debtorName.toLowerCase().includes(searchTerm);
+
+                return matchesStatus && matchesSearch;
+            });
+
+            const sortBy = sortBySelect.value;
+            filteredDebts.sort((a, b) => {
+                if (sortBy === 'dueDate') {
+                    return new Date(a.dueDate) - new Date(b.dueDate);
+                } else if (sortBy === 'amountAsc') {
+                    return a.amount - b.amount;
+                } else if (sortBy === 'amountDesc') {
+                    return b.amount - a.amount;
+                }
+                return 0;
+            });
+
+            if (filteredDebts.length === 0) {
+                noDebtsMessage.classList.remove('hidden');
+            } else {
+                noDebtsMessage.classList.add('hidden');
+            }
+
+            filteredDebts.forEach(debt => {
+                const debtItem = document.createElement('div');
+                debtItem.className = `p-4 rounded-lg shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center transition duration-300 ease-in-out ${
+                    debt.isPaid ? 'bg-green-100 border-l-4 border-green-500' : 'bg-red-100 border-l-4 border-red-500'
+                } transform hover:scale-[1.01]`;
+
+                const statusText = debt.isPaid ? 'مدفوع' : 'مستحق';
+                const statusColor = debt.isPaid ? 'text-green-700' : 'text-red-700';
+
+                debtItem.innerHTML = `
+                    <div class="flex-grow mb-2 sm:mb-0">
+                        <p class="text-lg font-semibold text-gray-800">${debt.debtorName}</p>
+                        <p class="text-xl font-bold ${statusColor}">${debt.amount.toFixed(2)}</p>
+                        <p class="text-sm text-gray-600">المبلغ الأصلي: ${debt.originalAmount.toFixed(2)}</p>
+                        <p class="text-sm text-gray-600">تاريخ الاستحقاق: ${debt.dueDate}</p>
+                        ${debt.description ? `<p class="text-sm text-gray-500">الوصف: ${debt.description}</p>` : ''}
+                        <p class="text-sm font-medium ${statusColor}">الحالة: ${statusText}</p>
+                    </div>
+                    <div class="flex gap-2">
+                        ${!debt.isPaid ? `<button data-doc-id="${debt.docId}" data-category="${category}" class="mark-paid-btn bg-green-500 text-white px-4 py-2 rounded-lg hover:bg-green-600 transition duration-200 text-sm">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 inline-block mr-1" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
+                            </svg>
+                            تم الدفع
+                        </button>` : ''}
+                        ${!debt.isPaid ? `<button data-doc-id="${debt.docId}" data-category="${category}" class="edit-debt-btn bg-yellow-500 text-white px-4 py-2 rounded-lg hover:bg-yellow-600 transition duration-200 text-sm">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 inline-block mr-1" viewBox="0 0 20 20" fill="currentColor">
+                                <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.38-2.828-2.828z" />
+                            </svg>
+                            تعديل
+                        </button>` : ''}
+                        <button data-doc-id="${debt.docId}" data-category="${category}" class="delete-debt-btn bg-gray-300 text-gray-800 px-4 py-2 rounded-lg hover:bg-gray-400 transition duration-200 text-sm">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 inline-block mr-1" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm6 0a1 1 0 11-2 0v6a1 1 0 112 0V8z" clip-rule="evenodd" />
+                            </svg>
+                            حذف
+                        </button>
+                    </div>
+                `;
+                debtListDiv.appendChild(debtItem);
+            });
+
+            // Update total outstanding
+            const total = appData[category].reduce((sum, debt) => {
+                return sum + (debt.isPaid ? 0 : debt.amount);
+            }, 0);
+            totalOutstandingSpan.textContent = total.toFixed(2);
+        }
+
+        // Function to mark a debt as paid in Firestore
+        async function markDebtAsPaid(docId, category) {
+            if (!window.db) {
+                showModal('خطأ', 'Firebase غير مهيأ. لا يمكن تحديث الدين.', 'alert');
+                return;
+            }
+            const debtRef = doc(getCollectionRef(category), docId);
+            try {
+                await updateDoc(debtRef, {
+                    isPaid: true,
+                    amount: 0 // Set amount to 0 when fully paid
+                });
+                showModal('تم التحديث', 'تم تحديد الدين كمدفوع.', 'alert');
+            } catch (e) {
+                console.error("Error updating document: ", e);
+                showModal('خطأ', 'حدث خطأ أثناء تحديث الدين. الرجاء المحاولة مرة أخرى.', 'alert');
+            }
+        }
+
+        // Function to delete a debt from Firestore
+        async function deleteDebt(docId, category) {
+            if (!window.db) {
+                showModal('خطأ', 'Firebase غير مهيأ. لا يمكن حذف الدين.', 'alert');
+                return;
+            }
+            const debtRef = doc(getCollectionRef(category), docId);
+            try {
+                await deleteDoc(debtRef);
+                showModal('تم الحذف', 'تم حذف الدين بنجاح.', 'alert');
+            } catch (e) {
+                console.error("Error deleting document: ", e);
+                showModal('خطأ', 'حدث خطأ أثناء حذف الدين. الرجاء المحاولة مرة أخرى.', 'alert');
+            }
+        }
+
+        // --- Edit Debt Modal Logic ---
+        function openEditDebtModal(docId, category) {
+            const editDebtModal = document.getElementById('editDebtModal');
+            const editDebtDocIdInput = document.getElementById('editDebtDocId');
+            const editDebtCategoryInput = document.getElementById('editDebtCategory');
+            const editDebtorNameInput = document.getElementById('editDebtorName');
+            const editCurrentAmountInput = document.getElementById('editCurrentAmount');
+            const editPaymentAmountInput = document.getElementById('editPaymentAmount');
+
+            const debt = appData[category].find(d => d.docId === docId);
+            if (!debt) return;
+
+            editDebtDocIdInput.value = docId;
+            editDebtCategoryInput.value = category;
+            editDebtorNameInput.value = debt.debtorName;
+            editCurrentAmountInput.value = debt.amount.toFixed(2);
+            editPaymentAmountInput.value = ''; // Clear previous payment input
+            editDebtModal.classList.remove('hidden');
+        }
+
+        document.getElementById('updateDebtBtn').addEventListener('click', async () => {
+            if (!window.db) {
+                showModal('خطأ', 'Firebase غير مهيأ. لا يمكن تحديث الدين.', 'alert');
+                return;
+            }
+            const docId = document.getElementById('editDebtDocId').value;
+            const category = document.getElementById('editDebtCategory').value;
+            const paymentAmount = parseFloat(document.getElementById('editPaymentAmount').value);
+
+            const debt = appData[category].find(d => d.docId === docId);
+            if (!debt) {
+                showModal('خطأ', 'الدين غير موجود.', 'alert');
+                document.getElementById('editDebtModal').classList.add('hidden');
+                return;
+            }
+
+            if (isNaN(paymentAmount) || paymentAmount <= 0) {
+                showModal('خطأ في الإدخال', 'الرجاء إدخال مبلغ تسديد صحيح وموجب.', 'alert');
+                return;
+            }
+
+            if (paymentAmount > debt.amount) {
+                showModal('خطأ في التسديد', 'مبلغ التسديد أكبر من المبلغ المستحق.', 'alert');
+                return;
+            }
+
+            const newAmount = debt.amount - paymentAmount;
+            const isPaid = newAmount <= 0.01; // Consider it paid if amount is very small or zero
+
+            try {
+                const debtRef = doc(getCollectionRef(category), docId);
+                await updateDoc(debtRef, {
+                    amount: isPaid ? 0 : newAmount,
+                    isPaid: isPaid
+                });
+
+                document.getElementById('editDebtModal').classList.add('hidden');
+                if (isPaid) {
+                    showModal('تم التسديد بالكامل', `تم تسديد دين ${debt.debtorName} بالكامل.`, 'alert');
+                } else {
+                    showModal('تم التحديث', `تم تسديد ${paymentAmount.toFixed(2)} من دين ${debt.debtorName}. المبلغ المتبقي: ${newAmount.toFixed(2)}.`, 'alert');
+                }
+            } catch (e) {
+                console.error("Error updating debt: ", e);
+                showModal('خطأ', 'حدث خطأ أثناء تحديث الدين. الرجاء المحاولة مرة أخرى.', 'alert');
+            }
+        });
+
+        document.getElementById('cancelEditBtn').addEventListener('click', () => {
+            document.getElementById('editDebtModal').classList.add('hidden');
+        });
+
+        // --- Category Tab Switching Logic ---
+        const tabButtons = document.querySelectorAll('.tab-button');
+        const categoryContents = document.querySelectorAll('.category-content');
+
+        tabButtons.forEach(button => {
+            button.addEventListener('click', () => {
+                tabButtons.forEach(btn => btn.classList.remove('active'));
+                categoryContents.forEach(content => content.classList.add('hidden'));
+
+                button.classList.add('active');
+                currentCategory = button.dataset.category;
+                document.getElementById(`${currentCategory}-content`).classList.remove('hidden');
+
+                // Re-render debts for the newly active category based on current appData
+                renderDebts(currentCategory);
+            });
+        });
+
+        // --- Event Listeners for each category ---
+
+        // Individual Category Listeners
+        document.getElementById('addIndividualDebtBtn').addEventListener('click', () => addDebt('individual'));
+        document.getElementById('individualFilterStatus').addEventListener('change', () => renderDebts('individual'));
+        document.getElementById('individualSortBy').addEventListener('change', () => renderDebts('individual'));
+        document.getElementById('individualSearchInput').addEventListener('input', () => renderDebts('individual'));
+
+        // Wholesale Category Listeners
+        document.getElementById('addWholesaleDebtBtn').addEventListener('click', () => addDebt('wholesale'));
+        document.getElementById('wholesaleFilterStatus').addEventListener('change', () => renderDebts('wholesale'));
+        document.getElementById('wholesaleSortBy').addEventListener('change', () => renderDebts('wholesale'));
+        document.getElementById('wholesaleSearchInput').addEventListener('input', () => renderDebts('wholesale'));
+
+        // Agent Category Listeners
+        document.getElementById('addAgentDebtBtn').addEventListener('click', () => addDebt('agent'));
+        document.getElementById('agentFilterStatus').addEventListener('change', () => renderDebts('agent'));
+        document.getElementById('agentSortBy').addEventListener('change', () => renderDebts('agent'));
+        document.getElementById('agentSearchInput').addEventListener('input', () => renderDebts('agent'));
+
+
+        // --- Firestore Real-time Listeners ---
+        // This function will be called once Firebase is authenticated
+        window.loadAndRenderAllDebts = function() { // Made global by attaching to window
+            const loadingOverlay = document.getElementById('loadingOverlay');
+            const appContent = document.getElementById('appContent');
+            const userIdDisplay = document.getElementById('userIdDisplay');
+
+            if (!window.db || !window.currentUserId) {
+                console.warn("Firestore not ready. Cannot load debts.");
+                // If Firebase is not configured or fails, still show the app content
+                // but without persistence.
+                appContent.classList.remove('hidden');
+                loadingOverlay.classList.add('hidden');
+                userIdDisplay.textContent = "غير متوفر (خطأ في Firebase)";
+                renderDebts(currentCategory); // Render with empty data
+                return;
+            }
+
+            userIdDisplay.textContent = window.currentUserId;
+            appContent.classList.remove('hidden');
+            loadingOverlay.classList.add('hidden');
+
+            const categories = ['individual', 'wholesale', 'agent'];
+            categories.forEach(category => {
+                onSnapshot(getCollectionRef(category), (snapshot) => {
+                    appData[category] = snapshot.docs.map(doc => ({
+                        docId: doc.id, // Store Firestore document ID
+                        ...doc.data()
+                    }));
+                    // Only render the current active category
+                    if (currentCategory === category) {
+                        renderDebts(category);
+                    }
+                    // Always update total for all categories, even if not currently displayed
+                    const totalOutstandingSpan = document.getElementById(`total${category.charAt(0).toUpperCase() + category.slice(1)}Outstanding`);
+                    const total = appData[category].reduce((sum, debt) => {
+                        return sum + (debt.isPaid ? 0 : debt.amount);
+                    }, 0);
+                    if (totalOutstandingSpan) {
+                        totalOutstandingSpan.textContent = total.toFixed(2);
+                    }
+                }, (error) => {
+                    console.error(`Error fetching ${category} debts:`, error);
+                    showModal('خطأ في التحميل', `حدث خطأ أثناء تحميل ديون ${category}.`, 'alert');
+                });
+            });
+        };
+
+        // Firebase initialization
+        if (firebaseConfig.apiKey && firebaseConfig.projectId && firebaseConfig.appId) {
+            window.firebaseApp = initializeApp(firebaseConfig);
+            window.db = getFirestore(window.firebaseApp);
+            window.auth = getAuth(window.firebaseApp);
+
+            onAuthStateChanged(window.auth, async (user) => {
+                if (user) {
+                    window.currentUserId = user.uid;
+                    console.log("Authenticated with UID:", user.uid);
+                    window.loadAndRenderAllDebts(); // Load data after authentication
+                } else {
+                    // Sign in anonymously if no user is logged in
+                    try {
+                        await signInAnonymously(window.auth);
+                    } catch (error) {
+                        console.error("Error during Firebase anonymous authentication:", error);
+                        // Fallback if authentication fails, still try to render empty lists
+                        window.currentUserId = crypto.randomUUID(); // Generate a random ID
+                        window.loadAndRenderAllDebts();
+                    }
+                }
+            });
+        } else {
+            console.warn("Firebase config is incomplete. App will run without persistence.");
+            window.currentUserId = crypto.randomUUID(); // Generate a random ID for unauthenticated users
+            window.loadAndRenderAllDebts(); // Still render UI
+        }
+
+        // Initial check for Firebase and loading overlay control
+        document.addEventListener('DOMContentLoaded', () => {
+            // The Firebase initialization and data loading is now handled by the script in the head
+            // which calls window.loadAndRenderAllDebts() after authentication.
+            // This ensures UI is hidden until data is ready.
+        });
+    </script>
+</body>
+</html>
